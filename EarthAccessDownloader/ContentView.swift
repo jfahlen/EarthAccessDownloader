@@ -151,8 +151,15 @@ private struct ResultsView: View {
                         .padding([.horizontal, .bottom], 8)
                 }
                 Divider()
-                List(model.granules, selection: $model.selectedGranules) { granule in
-                    GranuleRow(model: model, granule: granule)
+                List(selection: $model.selectedGranules) {
+                    ForEach(ResultRow.rows(from: model.granules)) { row in
+                        switch row {
+                        case let .granule(granule):
+                            GranuleRow(model: model, granule: granule).tag(granule.id)
+                        case let .flightline(prefix, product, granules):
+                            FlightlineRow(model: model, prefix: prefix, product: product, granules: granules)
+                        }
+                    }
                 }
             }
             Divider()
@@ -192,6 +199,44 @@ private struct SelectionBar: View {
             .fixedSize()
         }
         .padding(8)
+    }
+}
+
+private struct FlightlineRow: View {
+    @Bindable var model: SearchViewModel
+    let prefix: String
+    let product: String
+    let granules: [Granule]
+    @State private var expanded = true
+
+    private var files: [GranuleFile] { granules.flatMap(\.files) }
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            ForEach(granules) { granule in
+                GranuleRow(model: model, granule: granule).tag(granule.id)
+            }
+        } label: {
+            HStack {
+                Toggle(isOn: Binding(get: { model.isAllSelected(files) },
+                                     set: { model.setSelected(files, $0) })) { EmptyView() }
+                    .toggleStyle(TriStateCheckboxStyle(
+                        mixed: !model.isAllSelected(files) && model.isAnySelected(files)))
+                Image(systemName: "airplane")
+                VStack(alignment: .leading) {
+                    Text("Flightline \(prefix)").font(.body.weight(.semibold)).textSelection(.enabled)
+                    Text("\(product) · \(granules.count) segments · \(files.count) files")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("All") { model.setSelected(files, true) }
+                    .buttonStyle(.borderless)
+                    .help("Select all files in every segment of this flightline")
+                Button("None") { model.setSelected(files, false) }
+                    .buttonStyle(.borderless)
+                    .help("Deselect all files in this flightline")
+            }
+        }
     }
 }
 

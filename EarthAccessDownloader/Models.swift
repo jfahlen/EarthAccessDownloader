@@ -66,6 +66,40 @@ struct Granule: Identifiable, Hashable, Decodable {
     var productInfo: Product? { Product.all.first { $0.label == product } }
 }
 
+/// A top-level entry in the results list: a lone granule, or the segments of one flightline.
+enum ResultRow: Identifiable {
+    case granule(Granule)
+    case flightline(prefix: String, product: String, granules: [Granule])
+
+    var id: String {
+        switch self {
+        case let .granule(g): return g.id
+        case let .flightline(prefix, product, _): return "line/\(product)/\(prefix)"
+        }
+    }
+
+    /// Groups granules sharing a flightline (within one product) when there are at least two,
+    /// keeping the order of first appearance.
+    static func rows(from granules: [Granule]) -> [ResultRow] {
+        var members: [String: [Granule]] = [:]
+        for g in granules {
+            if let prefix = g.flightlinePrefix { members["\(g.product)/\(prefix)", default: []].append(g) }
+        }
+        var emitted = Set<String>()
+        var rows: [ResultRow] = []
+        for g in granules {
+            guard let prefix = g.flightlinePrefix, let group = members["\(g.product)/\(prefix)"], group.count > 1 else {
+                rows.append(.granule(g))
+                continue
+            }
+            if emitted.insert("\(g.product)/\(prefix)").inserted {
+                rows.append(.flightline(prefix: prefix, product: g.product, granules: group.sorted { $0.name < $1.name }))
+            }
+        }
+        return rows
+    }
+}
+
 enum LocationMode: String, CaseIterable, Identifiable {
     case point = "Point"
     case box = "Corners"
