@@ -13,5 +13,6 @@ struct EarthAccessDownloaderApp: App {
         WindowGroup {
             ContentView()
         }
+        .defaultSize(width: 1100, height: 800)
     }
 }
