@@ -21,8 +21,20 @@ enum HelperEvent {
     case ok
 }
 
+/// A Linux machine reached over ssh (key or agent auth; password prompts are not possible).
+struct RemoteConfig {
+    var host: String  // user@host or an ~/.ssh/config alias
+    var python: String
+}
+
 struct HelperClient {
     var pythonPath: String
+    /// When set, the helper runs on this machine instead of locally.
+    var remote: RemoteConfig?
+
+    private static func shellQuote(_ s: String) -> String {
+        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
 
     /// Runs `command` and yields each event. Throws `HelperError` if the helper reports one.
     func run(_ command: String, request: [String: Any]) -> AsyncThrowingStream<HelperEvent, Error> {
@@ -32,12 +44,25 @@ struct HelperClient {
                 return
             }
             let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            process.arguments = ["-l", "-c", "exec \"$EAD_PYTHON\" \"$EAD_SCRIPT\" \"$EAD_COMMAND\""]
             var env = ProcessInfo.processInfo.environment
-            env["EAD_PYTHON"] = pythonPath.isEmpty ? "python3" : pythonPath
-            env["EAD_SCRIPT"] = script
-            env["EAD_COMMAND"] = command
+            if let remote {
+                // Ship the script inside the command line so nothing needs installing remotely.
+                guard let source = try? Data(contentsOf: URL(fileURLWithPath: script)) else {
+                    continuation.finish(throwing: HelperError(message: "Could not read earthaccess_helper.py."))
+                    return
+                }
+                let python = remote.python.isEmpty ? "python3" : remote.python
+                let inner = "exec \(python) -c 'import base64;exec(base64.b64decode(\"\(source.base64EncodedString())\").decode())' \(command)"
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+                process.arguments = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+                                     remote.host, "bash -l -c " + Self.shellQuote(inner)]
+            } else {
+                process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+                process.arguments = ["-l", "-c", "exec \"$EAD_PYTHON\" \"$EAD_SCRIPT\" \"$EAD_COMMAND\""]
+                env["EAD_PYTHON"] = pythonPath.isEmpty ? "python3" : pythonPath
+                env["EAD_SCRIPT"] = script
+                env["EAD_COMMAND"] = command
+            }
             env["PYTHONUNBUFFERED"] = "1"
             process.environment = env
 
@@ -76,7 +101,8 @@ struct HelperClient {
     }
 
     private nonisolated static func decode(_ line: String) throws -> HelperEvent? {
-        guard let data = line.data(using: .utf8),
+        // Ignore anything that isn't a JSON object, e.g. a login banner printed by ssh.
+        guard line.hasPrefix("{"), let data = line.data(using: .utf8),
               let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = obj["type"] as? String else { return nil }
         switch type {

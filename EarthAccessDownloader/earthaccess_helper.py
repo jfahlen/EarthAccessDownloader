@@ -118,7 +118,7 @@ def cmd_download(req):
         emit(type="error", message="Not logged in to Earthdata. Run earthaccess.login(persist=True) "
              "or set EARTHDATA_USERNAME/EARTHDATA_PASSWORD (or EARTHDATA_TOKEN), then try again.")
         return
-    dest = req["dest"]
+    dest = os.path.expanduser(req["dest"])
     os.makedirs(dest, exist_ok=True)
     urls = req["urls"]
     for i, url in enumerate(urls):

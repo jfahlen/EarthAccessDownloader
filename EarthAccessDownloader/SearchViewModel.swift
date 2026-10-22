@@ -45,6 +45,19 @@ final class SearchViewModel {
     var destination: URL? = UserDefaults.standard.url(forKey: "destination") {
         didSet { UserDefaults.standard.set(destination, forKey: "destination") }
     }
+    var downloadRemotely: Bool = UserDefaults.standard.bool(forKey: "downloadRemotely") {
+        didSet { UserDefaults.standard.set(downloadRemotely, forKey: "downloadRemotely") }
+    }
+    var sshHost: String = UserDefaults.standard.string(forKey: "sshHost") ?? "" {
+        didSet { UserDefaults.standard.set(sshHost, forKey: "sshHost") }
+    }
+    var remoteDir: String = UserDefaults.standard.string(forKey: "remoteDir") ?? "" {
+        didSet { UserDefaults.standard.set(remoteDir, forKey: "remoteDir") }
+    }
+    var remotePython: String = UserDefaults.standard.string(forKey: "remotePython") ?? "python3" {
+        didSet { UserDefaults.standard.set(remotePython, forKey: "remotePython") }
+    }
+    private(set) var remoteCheck: String?
     private(set) var isDownloading = false
     private(set) var downloadStatus: String?
     private(set) var downloadFraction = 0.0
@@ -52,6 +65,36 @@ final class SearchViewModel {
     var errorMessage: String?
 
     private var client: HelperClient { HelperClient(pythonPath: pythonPath) }
+
+    private var remoteClient: HelperClient {
+        HelperClient(pythonPath: pythonPath,
+                     remote: RemoteConfig(host: sshHost.trimmingCharacters(in: .whitespaces), python: remotePython))
+    }
+
+    var canDownload: Bool {
+        guard !selection.isEmpty, !isDownloading else { return false }
+        return downloadRemotely
+            ? !sshHost.trimmingCharacters(in: .whitespaces).isEmpty && !remoteDir.trimmingCharacters(in: .whitespaces).isEmpty
+            : destination != nil
+    }
+
+    /// Where files will land, for display.
+    var destinationDescription: String {
+        downloadRemotely ? "\(sshHost.isEmpty ? "(no host)" : sshHost):\(remoteDir.isEmpty ? "(no folder)" : remoteDir)"
+                         : destination?.path ?? "No folder chosen"
+    }
+
+    func testRemote() async {
+        remoteCheck = "Connecting…"
+        do {
+            for try await event in remoteClient.run("check", request: [:]) {
+                if case .ok = event { remoteCheck = "Connected; earthaccess is available on \(sshHost)." }
+            }
+        } catch {
+            remoteCheck = "Failed: \(error.localizedDescription)"
+        }
+    }
+
 
     // MARK: Location
 
@@ -246,7 +289,15 @@ final class SearchViewModel {
     // MARK: Download
 
     func download() async {
-        guard let destination else { errorMessage = "Choose a download folder first."; return }
+        let destinationPath: String
+        if downloadRemotely {
+            guard canDownload else { errorMessage = "Enter an ssh host and a remote folder first."; return }
+            destinationPath = remoteDir.trimmingCharacters(in: .whitespaces)
+        } else {
+            guard let destination else { errorMessage = "Choose a download folder first."; return }
+            destinationPath = destination.path
+        }
+        let runner = downloadRemotely ? remoteClient : client
         let chosen = allFiles.filter { selection.contains($0.id) }
         guard !chosen.isEmpty else { return }
         errorMessage = nil
@@ -257,8 +308,8 @@ final class SearchViewModel {
 
         var failures: [String] = []
         do {
-            let request: [String: Any] = ["urls": chosen.map(\.url), "dest": destination.path]
-            for try await event in client.run("download", request: request) {
+            let request: [String: Any] = ["urls": chosen.map(\.url), "dest": destinationPath]
+            for try await event in runner.run("download", request: request) {
                 switch event {
                 case let .progress(index, total, name):
                     downloadFraction = Double(index) / Double(max(total, 1))
@@ -276,7 +327,7 @@ final class SearchViewModel {
             return
         }
         if failures.isEmpty {
-            downloadStatus = "Downloaded \(chosen.count) file\(chosen.count == 1 ? "" : "s") to \(destination.path)"
+            downloadStatus = "Downloaded \(chosen.count) file\(chosen.count == 1 ? "" : "s") to \(destinationDescription)"
         } else {
             downloadStatus = nil
             errorMessage = "\(failures.count) of \(chosen.count) downloads failed:\n" + failures.joined(separator: "\n")

@@ -79,8 +79,29 @@ private struct SearchForm: View {
                 }
             }
 
+            Section("Download") {
+                Picker("Download on", selection: $model.downloadRemotely) {
+                    Text("This Mac").tag(false)
+                    Text("Remote (ssh)").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                if model.downloadRemotely {
+                    TextField("Host", text: $model.sshHost, prompt: Text("user@host or ssh alias"))
+                    TextField("Folder", text: $model.remoteDir, prompt: Text("remote folder, e.g. ~/data"))
+                    TextField("Python", text: $model.remotePython, prompt: Text("remote python3"))
+                    HStack {
+                        Button("Test Connection") { Task { await model.testRemote() } }
+                            .disabled(model.sshHost.trimmingCharacters(in: .whitespaces).isEmpty)
+                        if let check = model.remoteCheck {
+                            Text(check).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+
             Section {
-                DisclosureGroup("Python (needs earthaccess installed)") {
+                DisclosureGroup("Local Python (needs earthaccess installed)") {
                     TextField("Python", text: $model.pythonPath, prompt: Text("python3"))
                         .labelsHidden()
                 }
@@ -325,8 +346,10 @@ private struct DownloadBar: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Button("Choose Folder…") { chooseFolder() }
-                Text(model.destination?.path ?? "No folder chosen")
+                if !model.downloadRemotely {
+                    Button("Choose Folder…") { chooseFolder() }
+                }
+                Text(model.destinationDescription)
                     .foregroundStyle(.secondary)
                     .lineLimit(1).truncationMode(.middle)
                 Spacer()
@@ -334,7 +357,7 @@ private struct DownloadBar: View {
                      + (model.selectedBytes > 0 ? " · \(formatBytes(model.selectedBytes))" : ""))
                     .monospacedDigit()
                 Button("Download") { Task { await model.download() } }
-                    .disabled(model.selection.isEmpty || model.destination == nil || model.isDownloading)
+                    .disabled(!model.canDownload)
             }
             if model.isDownloading {
                 ProgressView(value: model.downloadFraction)
