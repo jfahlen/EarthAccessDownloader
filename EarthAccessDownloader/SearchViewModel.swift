@@ -210,9 +210,16 @@ final class SearchViewModel {
 
     // MARK: Flightline extension
 
-    /// Highlighted granules that belong to a flightline we can extend.
+    /// Highlighted granules that belong to a flightline we can extend. A row counts as
+    /// highlighted either directly (its own id is selected) or because a row nested inside it
+    /// (a flightline segment) is selected.
     var extendableSelection: [Granule] {
-        granules.filter { selectedGranules.contains($0.id) && $0.flightlinePrefix != nil }
+        func selected(_ row: ResultRow) -> [Granule] {
+            if selectedGranules.contains(row.id) { return row.allGranules }
+            if case let .flightline(_, segments) = row { return segments.flatMap(selected) }
+            return []
+        }
+        return ResultRow.rows(from: granules).flatMap(selected).filter { $0.flightlinePrefix != nil }
     }
 
     /// Adds the remaining segments of the flightlines of `targets` to the results.

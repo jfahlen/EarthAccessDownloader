@@ -173,12 +173,15 @@ private struct ResultsView: View {
                 }
                 Divider()
                 List(selection: $model.selectedGranules) {
-                    ForEach(ResultRow.rows(from: model.granules)) { row in
-                        switch row {
-                        case let .granule(granule):
-                            GranuleRow(model: model, granule: granule).tag(granule.id)
-                        case let .flightline(prefix, product, granules):
-                            FlightlineRow(model: model, prefix: prefix, product: product, granules: granules)
+                    ForEach(ResultRow.groupedByInstrument(from: model.granules), id: \.instrument) { group in
+                        Section {
+                            ForEach(group.rows) { row in
+                                ResultRowView(model: model, row: row, accent: group.instrument.instrumentColor)
+                            }
+                        } header: {
+                            Text(group.instrument)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(group.instrument.instrumentColor)
                         }
                     }
                 }
@@ -223,39 +226,145 @@ private struct SelectionBar: View {
     }
 }
 
+/// Dispatches a `ResultRow` to the view that renders it, so granules, same-acquisition
+/// collections, and flightlines (made of either) all get consistent selection, extend-flightline,
+/// and bulk select/deselect behavior.
+private struct ResultRowView: View {
+    @Bindable var model: SearchViewModel
+    let row: ResultRow
+    let accent: Color
+
+    var body: some View {
+        switch row {
+        case let .granule(granule):
+            GranuleRow(model: model, granule: granule, accent: accent).tag(row.id)
+        case let .collection(label, granules):
+            CollectionRow(model: model, label: label, granules: granules, accent: accent).tag(row.id)
+        case let .flightline(prefix, segments):
+            FlightlineRow(model: model, prefix: prefix, segments: segments, accent: accent).tag(row.id)
+        }
+    }
+}
+
+/// A row's leading controls: a tri-state select-all toggle and an icon.
+private struct RowHeader: View {
+    let isAllSelected: Bool
+    let isAnySelected: Bool
+    let icon: String
+    let accent: Color
+    let onToggle: (Bool) -> Void
+
+    var body: some View {
+        Toggle(isOn: Binding(get: { isAllSelected }, set: onToggle)) { EmptyView() }
+            .toggleStyle(TriStateCheckboxStyle(mixed: !isAllSelected && isAnySelected))
+        Image(systemName: icon).foregroundStyle(accent)
+    }
+}
+
+/// A row's trailing controls: optional "find more segments" button, then All/None.
+private struct RowActions: View {
+    @Bindable var model: SearchViewModel
+    let granules: [Granule]
+    let files: [GranuleFile]
+    let flightlineHelp: String
+
+    var body: some View {
+        if granules.contains(where: { $0.flightlinePrefix != nil }) {
+            Button("Flightline") {
+                Task { await model.extendFlightlines(of: granules) }
+            }
+            .buttonStyle(.borderless)
+            .disabled(model.isExtending)
+            .help(flightlineHelp)
+        }
+        Button("All") { model.setSelected(files, true) }
+            .buttonStyle(.borderless)
+            .help("Select all files here")
+        Button("None") { model.setSelected(files, false) }
+            .buttonStyle(.borderless)
+            .help("Deselect all files here")
+    }
+}
+
 private struct FlightlineRow: View {
     @Bindable var model: SearchViewModel
     let prefix: String
-    let product: String
-    let granules: [Granule]
-    @State private var expanded = true
+    let segments: [ResultRow]
+    let accent: Color
+    @State private var expanded = false
 
+    private var granules: [Granule] { segments.flatMap(\.allGranules) }
     private var files: [GranuleFile] { granules.flatMap(\.files) }
 
     var body: some View {
         DisclosureGroup(isExpanded: $expanded) {
-            ForEach(granules) { granule in
-                GranuleRow(model: model, granule: granule).tag(granule.id)
+            ForEach(segments) { segment in
+                ResultRowView(model: model, row: segment, accent: accent)
             }
         } label: {
             HStack {
-                Toggle(isOn: Binding(get: { model.isAllSelected(files) },
-                                     set: { model.setSelected(files, $0) })) { EmptyView() }
-                    .toggleStyle(TriStateCheckboxStyle(
-                        mixed: !model.isAllSelected(files) && model.isAnySelected(files)))
-                Image(systemName: "airplane")
+                RowHeader(isAllSelected: model.isAllSelected(files), isAnySelected: model.isAnySelected(files),
+                          icon: "airplane", accent: accent) { model.setSelected(files, $0) }
                 VStack(alignment: .leading) {
-                    Text("Flightline \(prefix)").font(.body.weight(.semibold)).textSelection(.enabled)
-                    Text("\(product) · \(granules.count) segments · \(files.count) files")
+                    Text("Flightline \(prefix)").font(.body.weight(.semibold)).foregroundStyle(accent).textSelection(.enabled)
+                    Text("\(segments.count) segments · \(files.count) files")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button("All") { model.setSelected(files, true) }
-                    .buttonStyle(.borderless)
-                    .help("Select all files in every segment of this flightline")
-                Button("None") { model.setSelected(files, false) }
-                    .buttonStyle(.borderless)
-                    .help("Deselect all files in this flightline")
+                RowActions(model: model, granules: granules, files: files,
+                           flightlineHelp: "Find additional segments of this flightline")
+            }
+        }
+    }
+}
+
+/// Combines the granules of several products that describe the same acquisition
+/// (e.g. EMIT L1B Radiance + L2A Reflectance for one overflight) into a flat file list.
+private struct CollectionRow: View {
+    @Bindable var model: SearchViewModel
+    let label: String
+    let granules: [Granule]
+    let accent: Color
+    @State private var expanded = false
+
+    private var files: [GranuleFile] { granules.flatMap(\.files) }
+
+    private func product(of file: GranuleFile) -> String {
+        granules.first { $0.files.contains(file) }?.product ?? ""
+    }
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            ForEach(files) { file in
+                HStack {
+                    Toggle(isOn: Binding(
+                        get: { model.selection.contains(file.id) },
+                        set: { model.setSelected([file], $0) }
+                    )) {
+                        Text(file.name).textSelection(.enabled)
+                    }
+                    Spacer()
+                    Text(product(of: file)).font(.caption).foregroundStyle(.secondary)
+                    Text(file.kind).font(.caption).foregroundStyle(.secondary)
+                    if let bytes = file.bytes {
+                        Text(formatBytes(bytes))
+                            .font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                            .frame(width: 70, alignment: .trailing)
+                    }
+                }
+            }
+        } label: {
+            HStack {
+                RowHeader(isAllSelected: model.isAllSelected(files), isAnySelected: model.isAnySelected(files),
+                          icon: "square.stack.3d.up", accent: accent) { model.setSelected(files, $0) }
+                VStack(alignment: .leading) {
+                    Text(label).font(.body.weight(.semibold)).foregroundStyle(accent).textSelection(.enabled)
+                    Text("\(granules.map(\.product).sorted().joined(separator: " · ")) · \(files.count) files")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                RowActions(model: model, granules: granules, files: files,
+                           flightlineHelp: "Add the other segments of this collection's flightline")
             }
         }
     }
@@ -264,12 +373,8 @@ private struct FlightlineRow: View {
 private struct GranuleRow: View {
     @Bindable var model: SearchViewModel
     let granule: Granule
+    let accent: Color
     @State private var expanded = false
-
-    private var granuleToggle: Binding<Bool> {
-        Binding(get: { model.isAllSelected(granule.files) },
-                set: { model.setSelected(granule.files, $0) })
-    }
 
     var body: some View {
         DisclosureGroup(isExpanded: $expanded) {
@@ -292,30 +397,16 @@ private struct GranuleRow: View {
             }
         } label: {
             HStack {
-                // Mixed state shows as a dash when only some files are selected.
-                Toggle(isOn: granuleToggle) { EmptyView() }
-                    .toggleStyle(TriStateCheckboxStyle(
-                        mixed: !model.isAllSelected(granule.files) && model.isAnySelected(granule.files)))
+                RowHeader(isAllSelected: model.isAllSelected(granule.files), isAnySelected: model.isAnySelected(granule.files),
+                          icon: "doc", accent: accent) { model.setSelected(granule.files, $0) }
                 VStack(alignment: .leading) {
-                    Text(granule.name).font(.body.weight(.medium)).textSelection(.enabled)
+                    Text(granule.name).font(.body.weight(.medium)).foregroundStyle(accent).textSelection(.enabled)
                     Text("\(granule.product) · \(granule.start.map(Self.display) ?? "unknown date") · \(granule.files.count) files")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                if granule.flightlinePrefix != nil {
-                    Button("Flightline") {
-                        Task { await model.extendFlightlines(of: [granule]) }
-                    }
-                    .buttonStyle(.borderless)
-                    .disabled(model.isExtending)
-                    .help("Add the other segments of this granule's flightline")
-                }
-                Button("All") { model.setSelected(granule.files, true) }
-                    .buttonStyle(.borderless)
-                    .help("Select all files in this granule")
-                Button("None") { model.setSelected(granule.files, false) }
-                    .buttonStyle(.borderless)
-                    .help("Deselect all files in this granule")
+                RowActions(model: model, granules: [granule], files: granule.files,
+                           flightlineHelp: "Add the other segments of this granule's flightline")
             }
         }
     }

@@ -4,6 +4,7 @@
 //
 
 import Foundation
+import SwiftUI
 
 struct Product: Identifiable, Hashable {
     let label: String
@@ -12,6 +13,12 @@ struct Product: Identifiable, Hashable {
     let instrument: String
 
     var id: String { shortName + "/" + version }
+
+    /// A finer-grained grouping than `instrument` for display: splits AVIRIS into its variants
+    /// (AVIRIS-3, AVIRIS-5, AVIRIS-NG, AVIRIS-Classic) rather than lumping them together.
+    var displayInstrument: String {
+        label.split(separator: " ").first.map(String.init) ?? instrument
+    }
 
     static let all: [Product] = [
         Product(label: "EMIT L1B Radiance", shortName: "EMITL1BRAD", version: "002", instrument: "EMIT"),
@@ -63,40 +70,133 @@ struct Granule: Identifiable, Hashable, Decodable {
             .map { String($0.1) }
     }
 
+    private static let timestampToken = /^\d{8}[Tt]\d{6}$/
+    private static let flightIdToken = /^(?:AV\d|ang|prm|f)\d{6,8}[tT]\d{2,6}(?:p\d{2}r\d+)?$/
+    private static let hashToken = /^[0-9a-f]{8}$/
+    private static let versionToken = /^\d{3}$/
+
+    private static func isIdentifying(_ token: Substring) -> Bool {
+        token.wholeMatch(of: timestampToken) != nil || token.wholeMatch(of: flightIdToken) != nil
+            || token.wholeMatch(of: hashToken) != nil || token.wholeMatch(of: versionToken) != nil
+    }
+
+    /// A label identifying the physical acquisition independent of which product/level it is,
+    /// e.g. "EMIT_002_20220828T174405" or "AV520250602t202631_004". Granules from different
+    /// products that share this label describe the same acquisition and can be shown together.
+    /// Built by keeping only the tokens of `name` that identify the acquisition itself
+    /// (version, timestamp, flight id, hash) and dropping the product/level-specific ones,
+    /// mirroring the filename-kind stripping done in earthaccess_helper.py's `file_kind`.
+    var collectionLabel: String? {
+        let tokens = name.split(separator: "_")
+        guard let first = tokens.first else { return nil }
+        let identifying = tokens.filter(Self.isIdentifying)
+        guard !identifying.isEmpty else { return nil }
+        let joined = identifying.joined(separator: "_")
+        return Self.isIdentifying(first) ? joined : "\(first)_\(joined)"
+    }
+
     var productInfo: Product? { Product.all.first { $0.label == product } }
+
+    var instrument: String { productInfo?.instrument ?? "Other" }
+
+    /// The finer-grained grouping used for display; see `Product.displayInstrument`.
+    var displayInstrument: String { productInfo?.displayInstrument ?? instrument }
 }
 
-/// A top-level entry in the results list: a lone granule, or the segments of one flightline.
+/// A top-level entry in the results list: a lone granule, several products' granules for the
+/// same acquisition (e.g. EMIT L1B + L2A for one overflight), or the segments of one flightline
+/// (each segment itself a lone granule or a same-acquisition collection).
 enum ResultRow: Identifiable {
     case granule(Granule)
-    case flightline(prefix: String, product: String, granules: [Granule])
+    case collection(label: String, granules: [Granule])
+    indirect case flightline(prefix: String, segments: [ResultRow])
 
     var id: String {
         switch self {
         case let .granule(g): return g.id
-        case let .flightline(prefix, product, _): return "line/\(product)/\(prefix)"
+        case let .collection(label, _): return "col/\(label)"
+        case let .flightline(prefix, _): return "line/\(prefix)"
         }
     }
 
-    /// Groups granules sharing a flightline (within one product) when there are at least two,
-    /// keeping the order of first appearance.
-    static func rows(from granules: [Granule]) -> [ResultRow] {
-        var members: [String: [Granule]] = [:]
-        for g in granules {
-            if let prefix = g.flightlinePrefix { members["\(g.product)/\(prefix)", default: []].append(g) }
+    var instrument: String {
+        switch self {
+        case let .granule(g): return g.displayInstrument
+        case let .collection(_, granules): return granules.first?.displayInstrument ?? "Other"
+        case let .flightline(_, segments): return segments.first?.instrument ?? "Other"
         }
-        var emitted = Set<String>()
-        var rows: [ResultRow] = []
+    }
+
+    /// Sort key within an instrument group: a flightline/collection sorts by its label, a lone granule by its name.
+    private var sortKey: String {
+        switch self {
+        case let .granule(g): return g.name
+        case let .collection(label, _): return label
+        case let .flightline(prefix, _): return prefix
+        }
+    }
+
+    /// The flightline prefix shared by a row's granules, if any; used to group segments together.
+    private var flightlinePrefix: String? {
+        switch self {
+        case let .granule(g): return g.flightlinePrefix
+        case let .collection(_, granules): return granules.first?.flightlinePrefix
+        case .flightline: return nil
+        }
+    }
+
+    /// All granules contained in this row, for selection, file listing, and flightline extension.
+    var allGranules: [Granule] {
+        switch self {
+        case let .granule(g): return [g]
+        case let .collection(_, granules): return granules
+        case let .flightline(_, segments): return segments.flatMap(\.allGranules)
+        }
+    }
+
+    /// Groups granules describing the same acquisition (across products) into collections, then
+    /// groups the resulting rows sharing a flightline (across segments) into flightlines.
+    static func rows(from granules: [Granule]) -> [ResultRow] {
+        var acquisitionMembers: [String: [Granule]] = [:]
         for g in granules {
-            guard let prefix = g.flightlinePrefix, let group = members["\(g.product)/\(prefix)"], group.count > 1 else {
-                rows.append(.granule(g))
+            acquisitionMembers[g.collectionLabel ?? g.id, default: []].append(g)
+        }
+        var emittedAcquisitions = Set<String>()
+        var acquisitionRows: [ResultRow] = []
+        for g in granules {
+            let key = g.collectionLabel ?? g.id
+            guard emittedAcquisitions.insert(key).inserted else { continue }
+            let group = acquisitionMembers[key]!
+            acquisitionRows.append(group.count > 1
+                ? .collection(label: key, granules: group.sorted { $0.product < $1.product })
+                : .granule(group[0]))
+        }
+
+        var flightlineMembers: [String: [ResultRow]] = [:]
+        for row in acquisitionRows {
+            if let prefix = row.flightlinePrefix { flightlineMembers[prefix, default: []].append(row) }
+        }
+        var emittedFlightlines = Set<String>()
+        var rows: [ResultRow] = []
+        for row in acquisitionRows {
+            guard let prefix = row.flightlinePrefix,
+                  let group = flightlineMembers[prefix], group.count > 1 else {
+                rows.append(row)
                 continue
             }
-            if emitted.insert("\(g.product)/\(prefix)").inserted {
-                rows.append(.flightline(prefix: prefix, product: g.product, granules: group.sorted { $0.name < $1.name }))
+            if emittedFlightlines.insert(prefix).inserted {
+                rows.append(.flightline(prefix: prefix, segments: group.sorted { $0.sortKey < $1.sortKey }))
             }
         }
         return rows
+    }
+
+    /// Rows grouped by instrument (alphabetically), sorted by name within each group.
+    static func groupedByInstrument(from granules: [Granule]) -> [(instrument: String, rows: [ResultRow])] {
+        let grouped = Dictionary(grouping: rows(from: granules), by: \.instrument)
+        return grouped.keys.sorted().map { key in
+            (instrument: key, rows: grouped[key]!.sorted { $0.sortKey < $1.sortKey })
+        }
     }
 }
 
@@ -132,4 +232,16 @@ enum SearchLocation {
 
 func formatBytes(_ bytes: Int64) -> String {
     ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+}
+
+extension String {
+    private static let instrumentColorPalette: [Color] = [.blue, .orange, .green, .purple, .pink, .teal, .brown, .indigo]
+
+    /// A display color for a display-instrument name, assigned by alphabetical position among
+    /// all known display-instruments so each one is stable and distinct across runs.
+    var instrumentColor: Color {
+        let instruments = Set(Product.all.map(\.displayInstrument)).union([self]).sorted()
+        let index = instruments.firstIndex(of: self) ?? 0
+        return Self.instrumentColorPalette[index % Self.instrumentColorPalette.count]
+    }
 }
