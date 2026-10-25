@@ -51,13 +51,15 @@ final class SearchViewModel {
     }
 
     // Time window; ignored unless enabled. Dates default to midnight UTC; picking a start date
-    // resets the end date's default to the following day at midnight UTC.
+    // resets the end date's default to the following day at midnight UTC — unless the window was
+    // last set from a filename timestamp, in which case the user has already chosen a precise
+    // end date and further start date edits shouldn't clobber it.
     var useTime = false
     var startDate = SearchViewModel.midnightUTC(of: Calendar.current.date(byAdding: .month, value: -1, to: .now) ?? .now) {
-        didSet { if !isApplyingFilenameTimestamp { endDate = Self.nextMidnightUTC(after: startDate) } }
+        didSet { if !suppressEndDateAutoAdvance { endDate = Self.nextMidnightUTC(after: startDate) } }
     }
     var endDate = SearchViewModel.nextMidnightUTC(after: Calendar.current.date(byAdding: .month, value: -1, to: .now) ?? .now)
-    private var isApplyingFilenameTimestamp = false
+    private var suppressEndDateAutoAdvance = false
 
     /// Text entry for a granule/flightline filename timestamp (e.g. "20240914t172914"); applied
     /// via `applyFilenameTimestamp()`, not automatically as the user types.
@@ -65,18 +67,18 @@ final class SearchViewModel {
 
     /// Sets the time window to one minute before/after the timestamp currently in
     /// `filenameTimestampText` and turns the filter on. Reports an error if the text doesn't
-    /// contain a valid timestamp.
+    /// contain a valid timestamp. After this, editing the start date no longer auto-advances the
+    /// end date to the next day, since the user has demonstrated they want a precise window.
     func applyFilenameTimestamp() {
         guard let date = Self.parseFilenameTimestamp(filenameTimestampText) else {
             errorMessage = "\"\(filenameTimestampText)\" doesn't contain a recognizable timestamp (e.g. 20240914t172914)."
             return
         }
         errorMessage = nil
-        isApplyingFilenameTimestamp = true
+        suppressEndDateAutoAdvance = true
         useTime = true
         startDate = date.addingTimeInterval(-60)
         endDate = date.addingTimeInterval(60)
-        isApplyingFilenameTimestamp = false
     }
 
     // Location

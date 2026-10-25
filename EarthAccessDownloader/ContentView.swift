@@ -341,7 +341,7 @@ private struct FlightlineRow: View {
                 RowHeader(isAllSelected: model.isAllSelected(files), isAnySelected: model.isAnySelected(files),
                           icon: "airplane", accent: accent) { model.setSelected(files, $0) }
                 VStack(alignment: .leading) {
-                    Text("Flightline \(prefix)").font(.body.weight(.semibold)).foregroundStyle(accent).textSelection(.enabled)
+                    Text("\(prefix) Flightline").font(.body.weight(.semibold)).foregroundStyle(accent).textSelection(.enabled)
                     Text("\(segments.count) segments · \(files.count) files")
                         .font(.caption).foregroundStyle(.secondary)
                 }
