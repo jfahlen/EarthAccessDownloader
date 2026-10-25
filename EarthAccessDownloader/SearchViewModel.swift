@@ -9,10 +9,75 @@ import Observation
 @Observable
 @MainActor
 final class SearchViewModel {
-    // Time window; ignored unless enabled
+    static let utcCalendar: Calendar = {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        return calendar
+    }()
+
+    /// Midnight UTC on the day of `date`.
+    static func midnightUTC(of date: Date) -> Date {
+        let components = utcCalendar.dateComponents([.year, .month, .day], from: date)
+        return utcCalendar.date(from: components) ?? date
+    }
+
+    /// The day after `date`, at midnight UTC.
+    private static func nextMidnightUTC(after date: Date) -> Date {
+        utcCalendar.date(byAdding: .day, value: 1, to: midnightUTC(of: date)) ?? date
+    }
+
+    private static let filenameTimestampPattern = /(\d{4})(\d{2})(\d{2})[tT](\d{2})(\d{2})(\d{2})/
+
+    /// Parses a granule/flightline filename timestamp like "20240914t172914" (always UTC).
+    /// The timestamp may be the entire text or embedded in a full filename (e.g.
+    /// "EMIT_L1B_RAD_001_20240914T172914_2425714_013.nc"). Nil if no such timestamp is found or
+    /// it doesn't name a real date/time.
+    static func parseFilenameTimestamp(_ text: String) -> Date? {
+        guard let match = text.firstMatch(of: filenameTimestampPattern),
+              let year = Int(match.1), let month = Int(match.2), let day = Int(match.3),
+              let hour = Int(match.4), let minute = Int(match.5), let second = Int(match.6)
+        else { return nil }
+        var components = DateComponents()
+        (components.year, components.month, components.day) = (year, month, day)
+        (components.hour, components.minute, components.second) = (hour, minute, second)
+        guard let date = utcCalendar.date(from: components) else { return nil }
+        // Calendar normalizes out-of-range components (e.g. month 13) instead of failing, so
+        // round-trip to confirm the parsed date is actually the date that was typed.
+        let normalized = utcCalendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
+        guard normalized.year == year, normalized.month == month, normalized.day == day,
+              normalized.hour == hour, normalized.minute == minute, normalized.second == second
+        else { return nil }
+        return date
+    }
+
+    // Time window; ignored unless enabled. Dates default to midnight UTC; picking a start date
+    // resets the end date's default to the following day at midnight UTC.
     var useTime = false
-    var startDate = Calendar.current.date(byAdding: .month, value: -1, to: .now) ?? .now
-    var endDate = Date.now
+    var startDate = SearchViewModel.midnightUTC(of: Calendar.current.date(byAdding: .month, value: -1, to: .now) ?? .now) {
+        didSet { if !isApplyingFilenameTimestamp { endDate = Self.nextMidnightUTC(after: startDate) } }
+    }
+    var endDate = SearchViewModel.nextMidnightUTC(after: Calendar.current.date(byAdding: .month, value: -1, to: .now) ?? .now)
+    private var isApplyingFilenameTimestamp = false
+
+    /// Text entry for a granule/flightline filename timestamp (e.g. "20240914t172914"); applied
+    /// via `applyFilenameTimestamp()`, not automatically as the user types.
+    var filenameTimestampText = ""
+
+    /// Sets the time window to one minute before/after the timestamp currently in
+    /// `filenameTimestampText` and turns the filter on. Reports an error if the text doesn't
+    /// contain a valid timestamp.
+    func applyFilenameTimestamp() {
+        guard let date = Self.parseFilenameTimestamp(filenameTimestampText) else {
+            errorMessage = "\"\(filenameTimestampText)\" doesn't contain a recognizable timestamp (e.g. 20240914t172914)."
+            return
+        }
+        errorMessage = nil
+        isApplyingFilenameTimestamp = true
+        useTime = true
+        startDate = date.addingTimeInterval(-60)
+        endDate = date.addingTimeInterval(60)
+        isApplyingFilenameTimestamp = false
+    }
 
     // Location
     var mode: LocationMode = .point
@@ -129,19 +194,19 @@ final class SearchViewModel {
         let latRange = -90.0...90.0, lonRange = -180.0...180.0
         switch mode {
         case .point:
-            return .point(lon: try number(lon, "Longitude", range: lonRange),
+            return .point(lon: try number(lon, "Longitude (°E)", range: lonRange),
                           lat: try number(lat, "Latitude", range: latRange))
         case .box:
             let s = try number(llLat, "Lower-left latitude", range: latRange)
-            let w = try number(llLon, "Lower-left longitude", range: lonRange)
+            let w = try number(llLon, "Lower-left longitude (°E)", range: lonRange)
             let n = try number(urLat, "Upper-right latitude", range: latRange)
-            let e = try number(urLon, "Upper-right longitude", range: lonRange)
+            let e = try number(urLon, "Upper-right longitude (°E)", range: lonRange)
             guard n > s else { throw InputError(errorDescription: "Upper-right latitude must be north of lower-left.") }
-            guard e > w else { throw InputError(errorDescription: "Upper-right longitude must be east of lower-left.") }
+            guard e > w else { throw InputError(errorDescription: "Upper-right longitude (°E) must be greater (further east) than lower-left.") }
             return .bbox(west: w, south: s, east: e, north: n)
         case .offset:
             let s = try number(llLat, "Lower-left latitude", range: latRange)
-            let w = try number(llLon, "Lower-left longitude", range: lonRange)
+            let w = try number(llLon, "Lower-left longitude (°E)", range: lonRange)
             let dx = try number(offsetEast, "East offset (m)", range: 0...2_000_000)
             let dy = try number(offsetNorth, "North offset (m)", range: 0...2_000_000)
             let loc = SearchLocation.box(lowerLeftLat: s, lon: w, eastMeters: dx, northMeters: dy)
@@ -155,10 +220,46 @@ final class SearchViewModel {
     /// Human-readable box derived from the inputs, shown under the form.
     var resolvedBoxDescription: String? {
         guard mode == .offset, hasLocation, case let .bbox(w, s, e, n)? = try? location() else { return nil }
-        return String(format: "Upper right: %.5f°, %.5f°  (box W %.5f S %.5f E %.5f N %.5f)", n, e, w, s, e, n)
+        return String(format: "Upper right: %.5f°N, %.5f°E  (box W %.5f°E S %.5f°N E %.5f°E N %.5f°N)", n, e, w, s, e, n)
+    }
+
+    /// The longitude (degrees east; negative is west) at the center of the current location
+    /// input, used to estimate a local time zone for display. Nil if the location fields don't parse.
+    private var centerLongitude: Double? {
+        guard let loc = try? location() else { return nil }
+        switch loc {
+        case let .point(lon, _): return lon
+        case let .bbox(w, _, e, _): return (w + e) / 2
+        }
+    }
+
+    /// An approximate local time zone at the current location, estimated from longitude
+    /// (degrees east; 15° per hour of offset). Nil if no location is set.
+    var approximateLocalTimeZone: TimeZone? {
+        guard hasLocation, let lon = centerLongitude else { return nil }
+        let hours = Int((lon / 15.0).rounded())
+        return TimeZone(secondsFromGMT: hours * 3600)
+    }
+
+    /// `date` formatted in the approximate local time zone at the current location, for display
+    /// alongside the UTC date/time pickers. Nil if no location is set.
+    func localTimeDescription(for date: Date) -> String? {
+        guard let zone = approximateLocalTimeZone else { return nil }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d, yyyy 'at' h:mm a"
+        formatter.timeZone = zone
+        let hours = zone.secondsFromGMT() / 3600
+        return "\(formatter.string(from: date)) local (UTC\(hours >= 0 ? "+" : "")\(hours))"
     }
 
     // MARK: Search
+
+    private static func isoUTC(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = utcCalendar.timeZone
+        return formatter.string(from: date)
+    }
 
     func search() async {
         errorMessage = nil
@@ -170,8 +271,8 @@ final class SearchViewModel {
         if hasLocation {
             do { loc = try location() } catch { errorMessage = error.localizedDescription; return }
         }
-        if useTime, endDate < Calendar.current.startOfDay(for: startDate) {
-            errorMessage = "End date must not be before the start date."
+        if useTime, endDate <= startDate {
+            errorMessage = "End date/time must be after the start date/time."
             return
         }
         let products = Product.all.filter { selectedProducts.contains($0.id) }
@@ -181,8 +282,8 @@ final class SearchViewModel {
             "products": products.map { ["short_name": $0.shortName, "version": $0.version, "label": $0.label] },
         ]
         if useTime {
-            request["start"] = Self.isoDay(startDate) + "T00:00:00Z"
-            request["end"] = Self.isoDay(endDate) + "T23:59:59Z"
+            request["start"] = Self.isoUTC(startDate)
+            request["end"] = Self.isoUTC(endDate)
         }
         if let loc { request["location"] = loc.json }
 
@@ -254,11 +355,6 @@ final class SearchViewModel {
         extendStatus = added.isEmpty
             ? "No additional granules found for \(lines.count) flightline\(lines.count == 1 ? "" : "s")."
             : "Added \(added.count) granule\(added.count == 1 ? "" : "s") from \(lines.count) flightline\(lines.count == 1 ? "" : "s")."
-    }
-
-    private static func isoDay(_ date: Date) -> String {
-        let c = Calendar.current.dateComponents([.year, .month, .day], from: date)
-        return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
     }
 
     // MARK: Selection

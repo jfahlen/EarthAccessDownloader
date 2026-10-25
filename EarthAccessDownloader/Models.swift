@@ -208,7 +208,8 @@ enum LocationMode: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-/// A bounding box or point in the form earthaccess expects.
+/// A bounding box or point in the form earthaccess expects. Longitude is always degrees east
+/// (negative for west), latitude degrees north (negative for south).
 enum SearchLocation {
     case point(lon: Double, lat: Double)
     case bbox(west: Double, south: Double, east: Double, north: Double)

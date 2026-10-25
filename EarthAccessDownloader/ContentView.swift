@@ -31,11 +31,25 @@ private struct SearchForm: View {
         Form {
             Section {
                 Toggle("Filter by time window", isOn: $model.useTime)
-                DatePicker("From", selection: $model.startDate, displayedComponents: .date)
+                UTCDateTimeField("From", selection: $model.startDate)
                     .disabled(!model.useTime)
-                DatePicker("To", selection: $model.endDate, displayedComponents: .date)
+                if model.useTime, let local = model.localTimeDescription(for: model.startDate) {
+                    Text(local).font(.caption).foregroundStyle(.secondary)
+                }
+                UTCDateTimeField("To", selection: $model.endDate)
                     .disabled(!model.useTime)
-            } header: { Text("Time window") }
+                if model.useTime, let local = model.localTimeDescription(for: model.endDate) {
+                    Text(local).font(.caption).foregroundStyle(.secondary)
+                }
+                HStack {
+                    TextField("From filename", text: $model.filenameTimestampText, prompt: Text("e.g. 20240914t172914"))
+                        .onSubmit { model.applyFilenameTimestamp() }
+                    Button("Set") { model.applyFilenameTimestamp() }
+                        .disabled(model.filenameTimestampText.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                Text("Paste a timestamp from an EMIT/AVIRIS filename (always UTC), then press Return or Set to set the window to one minute before and after it.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } header: { Text("Time window (UTC)") }
 
             Section("Location (leave blank to ignore)") {
                 Picker("Mode", selection: $model.mode) {
@@ -47,21 +61,23 @@ private struct SearchForm: View {
                 switch model.mode {
                 case .point:
                     CoordField("Latitude", $model.lat)
-                    CoordField("Longitude", $model.lon)
+                    CoordField("Longitude (°E)", $model.lon)
                 case .box:
                     CoordField("Lower-left lat", $model.llLat)
-                    CoordField("Lower-left lon", $model.llLon)
+                    CoordField("Lower-left lon (°E)", $model.llLon)
                     CoordField("Upper-right lat", $model.urLat)
-                    CoordField("Upper-right lon", $model.urLon)
+                    CoordField("Upper-right lon (°E)", $model.urLon)
                 case .offset:
                     CoordField("Lower-left lat", $model.llLat)
-                    CoordField("Lower-left lon", $model.llLon)
+                    CoordField("Lower-left lon (°E)", $model.llLon)
                     CoordField("East offset (m)", $model.offsetEast, prompt: "meters")
                     CoordField("North offset (m)", $model.offsetNorth, prompt: "meters")
                     if let text = model.resolvedBoxDescription {
                         Text(text).font(.caption).foregroundStyle(.secondary)
                     }
                 }
+                Text("Longitude is degrees east; use a negative value for degrees west.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
 
             Section("Products") {
@@ -122,6 +138,25 @@ private struct SearchForm: View {
             }
             .padding([.horizontal, .bottom], 12)
         }
+    }
+}
+
+/// A date + time field pinned to UTC regardless of the user's system time zone, so the value
+/// shown and typed always matches what's sent to earthaccess. Supports both direct keyboard
+/// entry (click a segment and type digits) and the built-in calendar/time dropdowns.
+private struct UTCDateTimeField: View {
+    let label: String
+    @Binding var selection: Date
+
+    init(_ label: String, selection: Binding<Date>) {
+        self.label = label
+        _selection = selection
+    }
+
+    var body: some View {
+        DatePicker(label, selection: $selection, displayedComponents: [.date, .hourAndMinute])
+            .environment(\.timeZone, SearchViewModel.utcCalendar.timeZone)
+            .environment(\.calendar, SearchViewModel.utcCalendar)
     }
 }
 
