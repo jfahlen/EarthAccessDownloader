@@ -26,6 +26,7 @@ struct ContentView: View {
 
 private struct SearchForm: View {
     @Bindable var model: SearchViewModel
+    @State private var showCalendar = false
 
     var body: some View {
         Form {
@@ -40,6 +41,13 @@ private struct SearchForm: View {
                     .disabled(!model.useTime)
                 if model.useTime, let local = model.localTimeDescription(for: model.endDate) {
                     Text(local).font(.caption).foregroundStyle(.secondary)
+                }
+                Button { showCalendar = true } label: {
+                    Label("Pick on calendar…", systemImage: "calendar")
+                }
+                .disabled(!model.useTime)
+                .popover(isPresented: $showCalendar, arrowEdge: .trailing) {
+                    CalendarRangePopover(model: model)
                 }
                 DurationRow(model: model)
                     .disabled(!model.useTime)
