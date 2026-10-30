@@ -41,6 +41,11 @@ private struct SearchForm: View {
                 if model.useTime, let local = model.localTimeDescription(for: model.endDate) {
                     Text(local).font(.caption).foregroundStyle(.secondary)
                 }
+                DurationRow(model: model)
+                    .disabled(!model.useTime)
+                if model.useTime, !model.isTimeWindowValid {
+                    Text("The end must be after the start.").font(.caption).foregroundStyle(.red)
+                }
                 HStack {
                     TextField("From filename", text: $model.filenameTimestampText, prompt: Text("e.g. 20240914t172914"))
                         .onSubmit { model.applyFilenameTimestamp() }
@@ -157,6 +162,94 @@ private struct UTCDateTimeField: View {
         DatePicker(label, selection: $selection, displayedComponents: [.date, .hourAndMinute])
             .environment(\.timeZone, SearchViewModel.utcCalendar.timeZone)
             .environment(\.calendar, SearchViewModel.utcCalendar)
+    }
+}
+
+private enum DurationUnit: String, CaseIterable, Identifiable {
+    case minutes, hours, days, weeks
+
+    var id: String { rawValue }
+
+    var seconds: TimeInterval {
+        switch self {
+        case .minutes: 60
+        case .hours: 3600
+        case .days: 86400
+        case .weeks: 7 * 86400
+        }
+    }
+}
+
+/// Sets the end of the time window as a length after the start (e.g. "2 days"), and shows the
+/// current length whichever way the dates were set. Editing here moves the end; editing the
+/// start or end pickers just updates the displayed length.
+private struct DurationRow: View {
+    @Bindable var model: SearchViewModel
+    @State private var text = ""
+    @State private var unit = DurationUnit.days
+
+    private static let presets: [(label: String, seconds: TimeInterval)] = [
+        ("1 h", 3600), ("6 h", 6 * 3600), ("1 d", 86400), ("1 w", 7 * 86400), ("30 d", 30 * 86400),
+    ]
+
+    private static let formatter: DateComponentsFormatter = {
+        let formatter = DateComponentsFormatter()
+        formatter.allowedUnits = [.day, .hour, .minute]
+        formatter.unitsStyle = .full
+        formatter.maximumUnitCount = 3
+        return formatter
+    }()
+
+    private var length: TimeInterval { model.endDate.timeIntervalSince(model.startDate) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Duration")
+                Spacer()
+                TextField("Duration", text: $text, prompt: Text("0"))
+                    .labelsHidden()
+                    .multilineTextAlignment(.trailing)
+                    .frame(width: 70)
+                Picker("Unit", selection: $unit) {
+                    ForEach(DurationUnit.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .labelsHidden()
+                .fixedSize()
+            }
+            if model.useTime, length > 0, let description = Self.formatter.string(from: length) {
+                Text("From start to end: \(description)").font(.caption).foregroundStyle(.secondary)
+            }
+            HStack(spacing: 6) {
+                Text("Set to").font(.caption).foregroundStyle(.secondary)
+                ForEach(Self.presets, id: \.label) { preset in
+                    Button(preset.label) { model.endDate = model.startDate.addingTimeInterval(preset.seconds) }
+                        .controlSize(.small)
+                }
+            }
+        }
+        .onAppear(perform: sync)
+        .onChange(of: model.startDate) { sync() }
+        .onChange(of: model.endDate) { sync() }
+        .onChange(of: text) { apply() }
+        .onChange(of: unit) { apply() }
+    }
+
+    /// Moves the end so that the window is the typed length.
+    private func apply() {
+        guard let value = Double(text.trimmingCharacters(in: .whitespaces)), value > 0 else { return }
+        let end = model.startDate.addingTimeInterval(value * unit.seconds)
+        if end != model.endDate { model.endDate = end }
+    }
+
+    /// Shows the current window length, in the largest unit that expresses it exactly.
+    private func sync() {
+        guard length > 0 else { text = ""; return }
+        if let value = Double(text.trimmingCharacters(in: .whitespaces)),
+           abs(value * unit.seconds - length) < 1 { return }  // already showing this length
+        let best = DurationUnit.allCases.reversed().first { length.truncatingRemainder(dividingBy: $0.seconds) == 0 } ?? .minutes
+        unit = best
+        text = String(format: "%g", length / best.seconds)
     }
 }
 
