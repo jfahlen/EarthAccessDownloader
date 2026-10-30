@@ -136,56 +136,17 @@ private struct MapRepresentable: NSViewRepresentable {
         let c = context.coordinator
         c.onSelect = onSelect
         c.footprints = footprints
-        // Satellite imagery with place labels, so the scene outlines can still be located.
-        map.mapType = basemap == .satellite ? .hybrid : .standard
-
-        // Redraw only when something visible changed.
-        let key = footprints.map { "\($0.id)\($0.highlighted ? "*" : "")" }.joined(separator: ",")
-            + "|" + String(describing: search?.json)
-        guard key != c.drawnKey else { return }
-        let granulesChanged = footprints.map(\.id) != c.drawnIDs
-        c.drawnKey = key
-        c.drawnIDs = footprints.map(\.id)
-
-        map.removeOverlays(map.overlays)
-        map.removeAnnotations(map.annotations)
-        for f in footprints {
-            let polygon = FootprintPolygon(coordinates: f.coordinates, count: f.coordinates.count)
-            polygon.footprint = f
-            map.addOverlay(polygon)
-        }
-        var searchRect: MKMapRect?
-        switch search {
-        case let .point(lon, lat)?:
-            let pin = MKPointAnnotation()
-            pin.coordinate = CLLocationCoordinate2D(latitude: lat, longitude: lon)
-            pin.title = "Search point"
-            map.addAnnotation(pin)
-            searchRect = MKMapRect(origin: MKMapPoint(pin.coordinate), size: MKMapSize(width: 0, height: 0))
-        case let .bbox(w, s, e, n)?:
-            let corners = [(s, w), (s, e), (n, e), (n, w)]
-                .map { CLLocationCoordinate2D(latitude: $0.0, longitude: $0.1) }
-            let polygon = SearchAreaPolygon(coordinates: corners, count: 4)
-            map.addOverlay(polygon)
-            searchRect = polygon.boundingMapRect
-        case nil:
-            break
-        }
-
-        // Re-frame when the set of scenes changes, or while there are no scenes yet.
-        let skipFrame = handle.skipNextFrame
-        handle.skipNextFrame = false
-        if !skipFrame && (granulesChanged || footprints.isEmpty || !c.hasFramed) {
-            let rects = map.overlays.map(\.boundingMapRect) + (searchRect.map { [$0] } ?? [])
-            if let first = rects.first {
-                var union = rects.dropFirst().reduce(first) { $0.union($1) }
-                if union.size.width == 0 && union.size.height == 0 {  // a lone point: show some context
-                    union = union.insetBy(dx: -20_000, dy: -20_000)
-                }
-                map.setVisibleMapRect(union, edgePadding: NSEdgeInsets(top: 30, left: 30, bottom: 30, right: 30),
-                                      animated: c.hasFramed)
-                c.hasFramed = true
-            }
+        // Changing the map's overlays here, mid-update, makes it lay out while SwiftUI is still laying
+        // out ("NSHostingView is being laid out reentrantly"), so apply the newest state a beat later.
+        c.pending = Coordinator.Snapshot(footprints: footprints, search: search, basemap: basemap)
+        guard !c.applyScheduled else { return }
+        c.applyScheduled = true
+        let handle = handle
+        DispatchQueue.main.async { [weak map, c] in
+            c.applyScheduled = false
+            guard let map, let snapshot = c.pending else { return }
+            c.pending = nil
+            c.apply(snapshot, to: map, handle: handle)
         }
     }
 
@@ -195,15 +156,94 @@ private struct MapRepresentable: NSViewRepresentable {
         var drawnKey = ""
         var drawnIDs: [String] = []
         var hasFramed = false
+        var applyScheduled = false
+        var pending: Snapshot?
+
+        struct Snapshot {
+            let footprints: [Footprint]
+            let search: SearchLocation?
+            let basemap: MapBasemap
+        }
+
+        /// Brings the map in line with `snapshot`. Only a change in which scenes or search area is
+        /// shown rebuilds the overlays; a change in highlighting just restyles the existing outlines.
+        func apply(_ snapshot: Snapshot, to map: MKMapView, handle: MapHandle) {
+            let footprints = snapshot.footprints, search = snapshot.search
+            // Satellite imagery with place labels, so the scene outlines can still be located.
+            let mapType: MKMapType = snapshot.basemap == .satellite ? .hybrid : .standard
+            if map.mapType != mapType { map.mapType = mapType }
+
+            let key = footprints.map(\.id).joined(separator: ",") + "|" + String(describing: search?.json)
+            if key == drawnKey {
+                let byID = Dictionary(uniqueKeysWithValues: footprints.map { ($0.id, $0) })
+                for case let polygon as FootprintPolygon in map.overlays {
+                    guard let f = polygon.footprint.flatMap({ byID[$0.id] }) else { continue }
+                    polygon.footprint = f
+                    if let renderer = map.renderer(for: polygon) as? MKPolygonRenderer {
+                        Self.style(renderer, for: f)
+                        renderer.setNeedsDisplay()
+                    }
+                }
+                return
+            }
+            let granulesChanged = footprints.map(\.id) != drawnIDs
+            drawnKey = key
+            drawnIDs = footprints.map(\.id)
+
+            map.removeOverlays(map.overlays)
+            map.removeAnnotations(map.annotations)
+            for f in footprints {
+                let polygon = FootprintPolygon(coordinates: f.coordinates, count: f.coordinates.count)
+                polygon.footprint = f
+                map.addOverlay(polygon)
+            }
+            var searchRect: MKMapRect?
+            switch search {
+            case let .point(lon, lat)?:
+                let pin = MKPointAnnotation()
+                pin.coordinate = CLLocationCoordinate2D(latitude: lat, longitude: lon)
+                pin.title = "Search point"
+                map.addAnnotation(pin)
+                searchRect = MKMapRect(origin: MKMapPoint(pin.coordinate), size: MKMapSize(width: 0, height: 0))
+            case let .bbox(w, s, e, n)?:
+                let corners = [(s, w), (s, e), (n, e), (n, w)]
+                    .map { CLLocationCoordinate2D(latitude: $0.0, longitude: $0.1) }
+                let polygon = SearchAreaPolygon(coordinates: corners, count: 4)
+                map.addOverlay(polygon)
+                searchRect = polygon.boundingMapRect
+            case nil:
+                break
+            }
+
+            // Re-frame when the set of scenes changes, or while there are no scenes yet.
+            let skipFrame = handle.skipNextFrame
+            handle.skipNextFrame = false
+            if !skipFrame && (granulesChanged || footprints.isEmpty || !hasFramed) {
+                let rects = map.overlays.map(\.boundingMapRect) + (searchRect.map { [$0] } ?? [])
+                if let first = rects.first {
+                    var union = rects.dropFirst().reduce(first) { $0.union($1) }
+                    if union.size.width == 0 && union.size.height == 0 {  // a lone point: show some context
+                        union = union.insetBy(dx: -20_000, dy: -20_000)
+                    }
+                    map.setVisibleMapRect(union, edgePadding: NSEdgeInsets(top: 30, left: 30, bottom: 30, right: 30),
+                                          animated: hasFramed)
+                    hasFramed = true
+                }
+            }
+        }
+
+        private static func style(_ renderer: MKPolygonRenderer, for f: Footprint) {
+            let color = NSColor(f.instrument.instrumentColor)
+            renderer.strokeColor = color
+            renderer.fillColor = color.withAlphaComponent(f.highlighted ? 0.45 : 0.15)
+            renderer.lineWidth = f.highlighted ? 3 : 1
+        }
 
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
             guard let polygon = overlay as? MKPolygon else { return MKOverlayRenderer(overlay: overlay) }
             let renderer = MKPolygonRenderer(polygon: polygon)
             if let f = (polygon as? FootprintPolygon)?.footprint {
-                let color = NSColor(f.instrument.instrumentColor)
-                renderer.strokeColor = color
-                renderer.fillColor = color.withAlphaComponent(f.highlighted ? 0.45 : 0.15)
-                renderer.lineWidth = f.highlighted ? 3 : 1
+                Self.style(renderer, for: f)
             } else {
                 renderer.strokeColor = .systemRed
                 renderer.fillColor = NSColor.systemRed.withAlphaComponent(0.05)
