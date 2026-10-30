@@ -184,6 +184,52 @@ private struct ResultsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            HStack {
+                Toggle(isOn: $model.showMap) { Label("Map", systemImage: "map") }
+                    .toggleStyle(.button)
+                    .help("Show scene outlines and the search area on a map")
+                if model.showMap {
+                    Toggle(isOn: $model.isSelectingRegion) { Label("Select Region", systemImage: "rectangle.dashed") }
+                        .toggleStyle(.button)
+                        .help("Drag a rectangle on the map to set the search area's lower-left and upper-right corners")
+                    Picker("Basemap", selection: $model.mapBasemap) {
+                        ForEach(MapBasemap.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .fixedSize()
+                    .help("Standard map or satellite imagery")
+                    Picker("Show", selection: $model.mapScope) {
+                        ForEach(MapScope.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .fixedSize()
+                    .help("All results; only the highlighted rows; or every segment of the highlighted rows' flightlines")
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            Divider()
+            if model.showMap && !model.hasSearched && model.granules.isEmpty {
+                // Nothing to list yet: let the map (e.g. for choosing a region) use the whole pane.
+                ResultsMap(model: model).frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if model.showMap {
+                VSplitView {
+                    ResultsMap(model: model)
+                        .frame(maxWidth: .infinity, minHeight: 200, idealHeight: 320, maxHeight: .infinity)
+                    resultsList.frame(maxWidth: .infinity, minHeight: 160, maxHeight: .infinity)
+                }
+            } else {
+                resultsList.frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            Divider()
+            DownloadBar(model: model)
+        }
+    }
+
+    private var resultsList: some View {
+        VStack(spacing: 0) {
             if let error = model.errorMessage {
                 Text(error)
                     .foregroundStyle(.red)
@@ -207,22 +253,31 @@ private struct ResultsView: View {
                         .padding([.horizontal, .bottom], 8)
                 }
                 Divider()
-                List(selection: $model.selectedGranules) {
-                    ForEach(ResultRow.groupedByInstrument(from: model.granules), id: \.instrument) { group in
-                        Section {
-                            ForEach(group.rows) { row in
-                                ResultRowView(model: model, row: row, accent: group.instrument.instrumentColor)
+                ScrollViewReader { proxy in
+                    List(selection: $model.selectedGranules) {
+                        ForEach(ResultRow.groupedByInstrument(from: model.granules), id: \.instrument) { group in
+                            Section {
+                                ForEach(group.rows) { row in
+                                    ResultRowView(model: model, row: row, accent: group.instrument.instrumentColor)
+                                }
+                            } header: {
+                                Text(group.instrument)
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(group.instrument.instrumentColor)
                             }
-                        } header: {
-                            Text(group.instrument)
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(group.instrument.instrumentColor)
+                        }
+                    }
+                    .onChange(of: model.scrollTarget) { _, target in
+                        guard let target else { return }
+                        model.scrollTarget = nil
+                        // Wait a beat so a just-expanded flightline has laid out its segments.
+                        Task { @MainActor in
+                            try? await Task.sleep(for: .milliseconds(100))
+                            withAnimation { proxy.scrollTo(target, anchor: .center) }
                         }
                     }
                 }
             }
-            Divider()
-            DownloadBar(model: model)
         }
     }
 }
@@ -272,11 +327,11 @@ private struct ResultRowView: View {
     var body: some View {
         switch row {
         case let .granule(granule):
-            GranuleRow(model: model, granule: granule, accent: accent).tag(row.id)
+            GranuleRow(model: model, granule: granule, accent: accent).tag(row.id).id(row.id)
         case let .collection(label, granules):
-            CollectionRow(model: model, label: label, granules: granules, accent: accent).tag(row.id)
+            CollectionRow(model: model, label: label, granules: granules, accent: accent).tag(row.id).id(row.id)
         case let .flightline(prefix, segments):
-            FlightlineRow(model: model, prefix: prefix, segments: segments, accent: accent).tag(row.id)
+            FlightlineRow(model: model, prefix: prefix, segments: segments, accent: accent).tag(row.id).id(row.id)
         }
     }
 }
@@ -399,13 +454,20 @@ private struct FlightlineRow: View {
     let prefix: String
     let segments: [ResultRow]
     let accent: Color
-    @State private var expanded = false
+
+    private var expanded: Binding<Bool> {
+        Binding(get: { model.expandedFlightlines.contains("line/\(prefix)") },
+                set: { isOpen in
+                    if isOpen { model.expandedFlightlines.insert("line/\(prefix)") }
+                    else { model.expandedFlightlines.remove("line/\(prefix)") }
+                })
+    }
 
     private var granules: [Granule] { segments.flatMap(\.allGranules) }
     private var files: [GranuleFile] { granules.flatMap(\.files) }
 
     var body: some View {
-        DisclosureGroup(isExpanded: $expanded) {
+        DisclosureGroup(isExpanded: expanded) {
             ForEach(segments) { segment in
                 ResultRowView(model: model, row: segment, accent: accent)
             }

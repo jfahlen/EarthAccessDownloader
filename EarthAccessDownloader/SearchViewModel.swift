@@ -106,6 +106,12 @@ final class SearchViewModel {
     private(set) var hasSearched = false
     var selection = Set<String>()  // file URLs
     var selectedGranules = Set<String>()  // rows highlighted in the list
+    var showMap = false
+    var isSelectingRegion = false  // the map is waiting for a rectangle to be dragged
+    var mapScope = MapScope.all
+    var mapBasemap = MapBasemap.standard
+    var expandedFlightlines = Set<String>()  // ResultRow ids of open flightline disclosure groups
+    var scrollTarget: String?  // row the list should scroll to
     private(set) var isExtending = false
     private(set) var extendStatus: String?
 
@@ -358,6 +364,63 @@ final class SearchViewModel {
         extendStatus = added.isEmpty
             ? "No additional granules found for \(lines.count) flightline\(lines.count == 1 ? "" : "s")."
             : "Added \(added.count) granule\(added.count == 1 ? "" : "s") from \(lines.count) flightline\(lines.count == 1 ? "" : "s")."
+    }
+
+    // MARK: Map
+
+    /// Ids of the granules inside highlighted rows, for emphasis on the map.
+    var highlightedGranuleIDs: Set<String> {
+        func highlighted(_ row: ResultRow) -> [Granule] {
+            if selectedGranules.contains(row.id) { return row.allGranules }
+            if case let .flightline(_, segments) = row { return segments.flatMap(highlighted) }
+            return []
+        }
+        return Set(ResultRow.rows(from: granules).flatMap(highlighted).map(\.id))
+    }
+
+    /// Sets the search area to a rectangle chosen on the map, switching the form to corner entry.
+    func setRegion(west: Double, south: Double, east: Double, north: Double) {
+        func text(_ v: Double) -> String { String(format: "%.5f", v) }
+        mode = .box
+        llLat = text(south)
+        llLon = text(west)
+        urLat = text(north)
+        urLon = text(east)
+        errorMessage = nil
+    }
+
+    /// The granules the map draws under the current scope: everything, the highlighted rows only,
+    /// or every segment of the flightlines the highlighted rows belong to.
+    var mapGranules: [Granule] {
+        let highlighted = highlightedGranuleIDs
+        switch mapScope {
+        case .all:
+            return granules
+        case .selected:
+            return granules.filter { highlighted.contains($0.id) }
+        case .flightlines:
+            let lines = Set(granules.filter { highlighted.contains($0.id) }.compactMap(\.flightlinePrefix))
+            return granules.filter { highlighted.contains($0.id) || ($0.flightlinePrefix.map(lines.contains) ?? false) }
+        }
+    }
+
+    /// Highlights the innermost list row containing `granuleID` (a flightline segment, not the
+    /// whole flightline), expands its enclosing flightline so the row is visible, and scrolls to it.
+    /// With `extend`, toggles the row within the current highlight instead of replacing it.
+    func selectOnMap(granuleID: String, extend: Bool) {
+        func path(in row: ResultRow) -> [String]? {
+            guard row.allGranules.contains(where: { $0.id == granuleID }) else { return nil }
+            if case let .flightline(_, segments) = row {
+                return [row.id] + (segments.lazy.compactMap(path).first ?? [])
+            }
+            return [row.id]
+        }
+        guard let ids = ResultRow.rows(from: granules).lazy.compactMap(path).first, let id = ids.last else { return }
+        expandedFlightlines.formUnion(ids.dropLast())
+        if !extend { selectedGranules = [id] }
+        else if selectedGranules.contains(id) { selectedGranules.remove(id) }
+        else { selectedGranules.insert(id) }
+        scrollTarget = id
     }
 
     // MARK: Selection

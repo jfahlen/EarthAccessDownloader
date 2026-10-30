@@ -54,6 +54,16 @@ def parse_granule(g, product):
                 and url.lower().split("?")[0].endswith((".png", ".jpg", ".jpeg", ".gif"))):
             browse = url
             break
+    footprint = None
+    geometry = ((umm.get("SpatialExtent") or {}).get("HorizontalSpatialDomain") or {}).get("Geometry") or {}
+    if geometry.get("GPolygons"):
+        points = geometry["GPolygons"][0]["Boundary"]["Points"]
+        footprint = [[p["Longitude"], p["Latitude"]] for p in points]
+    elif geometry.get("BoundingRectangles"):
+        r = geometry["BoundingRectangles"][0]
+        w, e = r["WestBoundingCoordinate"], r["EastBoundingCoordinate"]
+        s_, n = r["SouthBoundingCoordinate"], r["NorthBoundingCoordinate"]
+        footprint = [[w, s_], [e, s_], [e, n], [w, n]]
     rng = (umm.get("TemporalExtent") or {}).get("RangeDateTime") or {}
     return {
         "id": g["meta"]["concept-id"],
@@ -64,6 +74,7 @@ def parse_granule(g, product):
         "files": files,
         "browse": browse,
         "cloud": umm.get("CloudCover"),
+        "footprint": footprint,
     }
 
 

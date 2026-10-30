@@ -66,6 +66,8 @@ struct Granule: Identifiable, Hashable, Decodable {
     let browse: String?
     /// Cloud cover in percent, when the catalog provides it (EMIT does; AVIRIS does not).
     let cloud: Double?
+    /// Scene outline as [longitude, latitude] corner points, when the catalog provides one.
+    let footprint: [[Double]]?
 
     /// Flightline id shared by all segments, e.g. "AV520250602t202631" for
     /// "AV520250602t202631_004_L1B_RDN_1". Nil for granules not named in segments.
@@ -220,6 +222,23 @@ enum ResultRow: Identifiable {
             (instrument: key, rows: grouped[key]!.sorted { $0.sortKey < $1.sortKey })
         }
     }
+}
+
+/// The basemap shown behind the outlines.
+enum MapBasemap: String, CaseIterable, Identifiable {
+    case standard = "Map"
+    case satellite = "Satellite"
+
+    var id: String { rawValue }
+}
+
+/// Which results the map draws.
+enum MapScope: String, CaseIterable, Identifiable {
+    case all = "All"
+    case selected = "Selected"
+    case flightlines = "Flightlines"
+
+    var id: String { rawValue }
 }
 
 enum LocationMode: String, CaseIterable, Identifiable {
