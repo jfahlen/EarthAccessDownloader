@@ -47,6 +47,13 @@ def parse_granule(g, product):
         name = url.rsplit("/", 1)[-1]
         files.append({"url": url, "name": name, "kind": file_kind(name),
                       "bytes": sizes.get(name)})
+    browse = None
+    for link in umm.get("RelatedUrls") or []:
+        url = link.get("URL") or ""
+        if (link.get("Type") == "GET RELATED VISUALIZATION" and url.startswith("http")
+                and url.lower().split("?")[0].endswith((".png", ".jpg", ".jpeg", ".gif"))):
+            browse = url
+            break
     rng = (umm.get("TemporalExtent") or {}).get("RangeDateTime") or {}
     return {
         "id": g["meta"]["concept-id"],
@@ -55,6 +62,8 @@ def parse_granule(g, product):
         "start": rng.get("BeginningDateTime"),
         "end": rng.get("EndingDateTime"),
         "files": files,
+        "browse": browse,
+        "cloud": umm.get("CloudCover"),
     }
 
 
@@ -133,6 +142,29 @@ def cmd_download(req):
     emit(type="done", total=len(urls))
 
 
+def cmd_quicklook(req):
+    import earthaccess
+
+    if not login():
+        emit(type="error", message="Not logged in to Earthdata. Run earthaccess.login(persist=True) "
+             "or set EARTHDATA_USERNAME/EARTHDATA_PASSWORD (or EARTHDATA_TOKEN), then try again.")
+        return
+    dest = req["dest"]
+    os.makedirs(dest, exist_ok=True)
+    url = req.get("url")
+    if not url:
+        # EMIT: the quicklook is the L1B radiance image of the same acquisition.
+        results = earthaccess.DataGranules().short_name("EMITL1BRAD").version("002") \
+            .readable_granule_name("EMIT_L1B_RAD_*_" + req["emit_acquisition"] + "*").get(1)
+        url = parse_granule(results[0], "")["browse"] if results else None
+        if not url:
+            raise RuntimeError("No L1B radiance quicklook found for this EMIT acquisition.")
+    paths = earthaccess.download([url], dest)
+    if not paths or isinstance(paths[0], Exception):
+        raise RuntimeError(str(paths[0]) if paths else "no file returned")
+    emit(type="file", path=str(paths[0]))
+
+
 def cmd_check(_req):
     import earthaccess  # noqa: F401
     emit(type="ok", version=earthaccess.__version__)
@@ -143,7 +175,7 @@ def main():
     req = json.loads(sys.stdin.read() or "{}")
     try:
         {"search": cmd_search, "download": cmd_download, "check": cmd_check,
-         "extend": cmd_extend}[cmd](req)
+         "extend": cmd_extend, "quicklook": cmd_quicklook}[cmd](req)
     except ImportError:
         emit(type="error", message="The earthaccess Python package is not installed for this "
              "interpreter. Run: pip install earthaccess")

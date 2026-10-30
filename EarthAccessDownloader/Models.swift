@@ -62,6 +62,10 @@ struct Granule: Identifiable, Hashable, Decodable {
     let start: String?
     let end: String?
     let files: [GranuleFile]
+    /// URL of the quicklook (browse) image, if the granule has one.
+    let browse: String?
+    /// Cloud cover in percent, when the catalog provides it (EMIT does; AVIRIS does not).
+    let cloud: Double?
 
     /// Flightline id shared by all segments, e.g. "AV520250602t202631" for
     /// "AV520250602t202631_004_L1B_RDN_1". Nil for granules not named in segments.
@@ -94,6 +98,24 @@ struct Granule: Identifiable, Hashable, Decodable {
         let joined = identifying.joined(separator: "_")
         return Self.isIdentifying(first) ? joined : "\(first)_\(joined)"
     }
+
+    /// An SF Symbol for the cloud cover: sun when mostly clear, cloud when mostly overcast.
+    static func cloudSymbol(_ percent: Double) -> String {
+        percent < 20 ? "sun.max" : percent < 60 ? "cloud.sun" : "cloud"
+    }
+
+    /// For EMIT, the acquisition timestamp (e.g. "20220810T034103") shared by every product of one acquisition.
+    var emitAcquisition: String? {
+        guard instrument == "EMIT" else { return nil }
+        return name.firstMatch(of: /\d{8}T\d{6}/).map { String($0.0) }
+    }
+
+    /// Whether to offer the quicklook. For EMIT it is always the L1B radiance image, looked up
+    /// from the acquisition, so it is available whichever EMIT product the granule is.
+    var hasQuicklook: Bool { emitAcquisition != nil || browse != nil }
+
+    /// Identifies the quicklook image, so granules that share one are shown (and downloaded) once.
+    var quicklookID: String { emitAcquisition.map { "emit/" + $0 } ?? id }
 
     var productInfo: Product? { Product.all.first { $0.label == product } }
 

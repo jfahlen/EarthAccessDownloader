@@ -1,4 +1,4 @@
-//
+	//
 //  ContentView.swift
 //  EarthAccessDownloader
 //
@@ -302,8 +302,25 @@ private struct RowActions: View {
     let granules: [Granule]
     let files: [GranuleFile]
     let flightlineHelp: String
+    @State private var showQuicklook = false
+
+    /// Cloud cover shared by the granules here (the same acquisition has one value); nil if unknown.
+    private var cloud: Double? { granules.compactMap(\.cloud).first }
 
     var body: some View {
+        if let cloud {
+            Image(systemName: Granule.cloudSymbol(cloud))
+                .foregroundStyle(.secondary)
+                .help("Cloud cover: \(Int(cloud.rounded()))%")
+        }
+        if granules.contains(where: \.hasQuicklook) {
+            Button("Quicklook") { showQuicklook = true }
+                .buttonStyle(.borderless)
+                .help("Download and show the quicklook image")
+                .sheet(isPresented: $showQuicklook) {
+                    QuicklookSheet(model: model, granules: granules.filter(\.hasQuicklook))
+                }
+        }
         if granules.contains(where: { $0.flightlinePrefix != nil }) {
             Button("Flightline") {
                 Task { await model.extendFlightlines(of: granules) }
@@ -318,6 +335,62 @@ private struct RowActions: View {
         Button("None") { model.setSelected(files, false) }
             .buttonStyle(.borderless)
             .help("Deselect all files here")
+    }
+}
+
+/// Shows the quicklook image of each granule, downloading it to a temporary folder on demand.
+private struct QuicklookSheet: View {
+    let model: SearchViewModel
+    let granules: [Granule]
+    @Environment(\.dismiss) private var dismiss
+
+    /// One entry per distinct image: EMIT products of one acquisition share their radiance quicklook.
+    private var images: [Granule] {
+        var seen = Set<String>()
+        return granules.filter { seen.insert($0.quicklookID).inserted }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 16) {
+                    ForEach(images) { QuicklookImage(model: model, granule: $0) }
+                }
+                .padding()
+            }
+            Divider()
+            HStack {
+                Spacer()
+                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+            .padding(8)
+        }
+        .frame(minWidth: 500, idealWidth: 700, minHeight: 400, idealHeight: 600)
+    }
+}
+
+private struct QuicklookImage: View {
+    let model: SearchViewModel
+    let granule: Granule
+    @State private var image: NSImage?
+    @State private var failure: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(granule.emitAcquisition.map { "EMIT L1B Radiance · \($0)" } ?? granule.name)
+                .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            if let image {
+                Image(nsImage: image).resizable().scaledToFit()
+            } else if let failure {
+                Text(failure).foregroundStyle(.red)
+            } else {
+                HStack { ProgressView().controlSize(.small); Text("Downloading…").foregroundStyle(.secondary) }
+            }
+        }
+        .task {
+            do { image = try await model.quicklook(for: granule) }
+            catch { failure = error.localizedDescription }
+        }
     }
 }
 

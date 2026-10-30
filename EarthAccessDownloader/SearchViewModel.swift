@@ -3,6 +3,7 @@
 //  EarthAccessDownloader
 //
 
+import AppKit
 import Foundation
 import Observation
 
@@ -390,6 +391,43 @@ final class SearchViewModel {
     }
 
     func files(ofKind kind: String) -> [GranuleFile] { allFiles.filter { $0.kind == kind } }
+
+    // MARK: Quicklook
+
+    /// Scratch folder for downloaded quicklook images. It lives in the system temporary
+    /// directory and is emptied at launch and quit, so the user never manages it.
+    nonisolated static let quicklookDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("EarthAccessDownloader-quicklooks", isDirectory: true)
+
+    static func cleanUpQuicklooks() {
+        try? FileManager.default.removeItem(at: quicklookDirectory)
+    }
+
+    private var quicklookCache: [String: NSImage] = [:]
+
+    /// Downloads (once) and returns the quicklook image of `granule`; for EMIT, its L1B radiance image.
+    func quicklook(for granule: Granule) async throws -> NSImage {
+        if let cached = quicklookCache[granule.quicklookID] { return cached }
+        var request: [String: Any]
+        if let acquisition = granule.emitAcquisition {
+            request = ["emit_acquisition": acquisition]
+        } else if let url = granule.browse {
+            request = ["url": url]
+        } else {
+            throw HelperError(message: "This granule has no quicklook image.")
+        }
+        request["dest"] = Self.quicklookDirectory
+            .appendingPathComponent(granule.quicklookID.replacingOccurrences(of: "/", with: "_"), isDirectory: true).path
+        var path: String?
+        for try await event in client.run("quicklook", request: request) {
+            if case let .file(p) = event { path = p }
+        }
+        guard let path, let image = NSImage(contentsOfFile: path) else {
+            throw HelperError(message: "Could not load the quicklook image.")
+        }
+        quicklookCache[granule.quicklookID] = image
+        return image
+    }
 
     // MARK: Download
 

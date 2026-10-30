@@ -17,6 +17,7 @@ enum HelperEvent {
     case granules([Granule], truncated: Bool)
     case progress(index: Int, total: Int, name: String)
     case fileError(name: String, message: String)
+    case file(path: String)
     case done
     case ok
 }
@@ -115,6 +116,7 @@ struct HelperClient {
                              name: obj["name"] as? String ?? "")
         case "file_error":
             return .fileError(name: obj["name"] as? String ?? "", message: obj["message"] as? String ?? "")
+        case "file": return .file(path: obj["path"] as? String ?? "")
         case "done": return .done
         case "ok": return .ok
         case "error": throw HelperError(message: obj["message"] as? String ?? "Unknown helper error")
