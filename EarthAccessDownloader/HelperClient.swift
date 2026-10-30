@@ -20,6 +20,10 @@ enum HelperEvent {
     case file(path: String)
     case done
     case ok
+    /// The helper reported an error. Only produced when reading a remote job's log.
+    case failure(String)
+    /// A remote job's wrapper finished; nonzero means the helper itself crashed.
+    case exit(status: Int)
 }
 
 /// A Linux machine reached over ssh (key or agent auth; password prompts are not possible).
@@ -33,7 +37,7 @@ struct HelperClient {
     /// When set, the helper runs on this machine instead of locally.
     var remote: RemoteConfig?
 
-    private static func shellQuote(_ s: String) -> String {
+    nonisolated static func shellQuote(_ s: String) -> String {
         "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
@@ -98,6 +102,87 @@ struct HelperClient {
                     continuation.finish(throwing: error)
                 }
             }
+        }
+    }
+
+    // MARK: Detached remote downloads
+
+    /// Starts a download on the remote machine that keeps running on its own, and returns
+    /// immediately with the remote job folder. The helper's output goes to `events.jsonl` there,
+    /// to be read back with `readRemoteFile`; the ssh connection is not needed once this returns.
+    func launchDownload(request: [String: Any]) async throws -> String {
+        guard let remote else { throw HelperError(message: "No remote machine is configured.") }
+        guard let script = Bundle.main.path(forResource: "earthaccess_helper", ofType: "py"),
+              let source = try? Data(contentsOf: URL(fileURLWithPath: script)) else {
+            throw HelperError(message: "Could not read earthaccess_helper.py.")
+        }
+        let body = try JSONSerialization.data(withJSONObject: request)
+        let runner = """
+            #!/bin/bash
+            cd "$(dirname "$0")"
+            "$EAD_PY" helper.py download < request.json > events.jsonl 2> stderr.log
+            echo "{\"type\":\"exit\",\"status\":$?}" >> events.jsonl
+            """ + "\n"
+        let stamp = ISO8601DateFormatter().string(from: .now).filter(\.isNumber)
+        let id = stamp + "-" + String(UInt16.random(in: 0...UInt16.max), radix: 16)
+        let python = remote.python.isEmpty ? "python3" : remote.python
+        let command = """
+            set -e
+            d="$HOME/.earthaccess_downloader/jobs/\(id)"
+            mkdir -p "$d"
+            echo '\(source.base64EncodedString())' | base64 -d > "$d/helper.py"
+            echo '\(body.base64EncodedString())' | base64 -d > "$d/request.json"
+            echo '\(Data(runner.utf8).base64EncodedString())' | base64 -d > "$d/runner.sh"
+            if command -v setsid >/dev/null 2>&1; then S=setsid; else S=; fi
+            EAD_PY=\(Self.shellQuote(python)) nohup $S bash "$d/runner.sh" > /dev/null 2>&1 < /dev/null &
+            echo "$d"
+            """
+        let output = try await remoteShell(command)
+        guard let dir = output.split(separator: "\n").last.map(String.init), dir.hasPrefix("/") else {
+            throw HelperError(message: "The remote machine did not start the download.")
+        }
+        return dir
+    }
+
+    /// Reads `name` from the remote job folder `dir`. An empty string means it doesn't exist yet.
+    func readRemoteFile(_ name: String, in dir: String) async throws -> String {
+        try await remoteShell("cat \(Self.shellQuote(dir + "/" + name)) 2>/dev/null || true")
+    }
+
+    /// Runs `command` on the remote machine over a short-lived ssh connection and returns its output.
+    private func remoteShell(_ command: String) async throws -> String {
+        guard let remote else { throw HelperError(message: "No remote machine is configured.") }
+        return try await Task.detached {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+            process.arguments = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+                                 remote.host, "bash -l -c " + Self.shellQuote(command)]
+            let stdout = Pipe(), stderr = Pipe()
+            process.standardOutput = stdout
+            process.standardError = stderr
+            process.standardInput = FileHandle.nullDevice
+            try process.run()
+            let out = stdout.fileHandleForReading.readDataToEndOfFile()
+            let err = stderr.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else {
+                let message = String(data: err, encoding: .utf8) ?? ""
+                throw HelperError(message: message.isEmpty ? "ssh exited with status \(process.terminationStatus)." : message)
+            }
+            return String(data: out, encoding: .utf8) ?? ""
+        }.value
+    }
+
+    /// Decodes a whole `events.jsonl` log. Unlike `run`, an error line becomes a `.failure` event.
+    nonisolated static func decodeLog(_ text: String) -> [HelperEvent] {
+        text.split(separator: "\n").compactMap { line in
+            let line = String(line)
+            if line.hasPrefix("{"), let data = line.data(using: .utf8),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                if obj["type"] as? String == "error" { return .failure(obj["message"] as? String ?? "Unknown helper error") }
+                if obj["type"] as? String == "exit" { return .exit(status: obj["status"] as? Int ?? -1) }
+            }
+            return (try? decode(line)) ?? nil
         }
     }
 

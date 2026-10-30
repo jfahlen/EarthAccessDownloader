@@ -490,6 +490,80 @@ final class SearchViewModel {
 
     // MARK: Download
 
+    /// Hands the download to the remote machine, which then runs it on its own (so it survives a
+    /// dropped connection or quitting the app), and follows its progress with short ssh checks.
+    private func runRemoteDownload(request: [String: Any], count: Int) async {
+        let host = sshHost.trimmingCharacters(in: .whitespaces)
+        let jobDir: String
+        do {
+            downloadStatus = "Sending the download to \(host)…"
+            jobDir = try await remoteClient.launchDownload(request: request)
+        } catch {
+            errorMessage = error.localizedDescription
+            downloadStatus = nil
+            return
+        }
+
+        var unreachable = 0
+        while true {
+            let log: String
+            do {
+                log = try await remoteClient.readRemoteFile("events.jsonl", in: jobDir)
+                unreachable = 0
+            } catch {
+                unreachable += 1
+                if unreachable >= 10 {
+                    errorMessage = "Lost contact with \(host). The download keeps running there; its progress is logged in \(jobDir)/events.jsonl."
+                    downloadStatus = nil
+                    return
+                }
+                downloadStatus = "Can't reach \(host) (try \(unreachable)). The download keeps running there; retrying…"
+                try? await Task.sleep(for: .seconds(5))
+                continue
+            }
+
+            var failures: [String] = []
+            var finished = false
+            var crashed: Int?
+            var remoteError: String?
+            for event in HelperClient.decodeLog(log) {
+                switch event {
+                case let .progress(index, total, name):
+                    downloadFraction = Double(index) / Double(max(total, 1))
+                    downloadStatus = "Downloading on \(host): \(index + 1) of \(total): \(name)"
+                case let .fileError(name, message): failures.append("\(name): \(message)")
+                case .done: downloadFraction = 1; finished = true
+                case let .failure(message): remoteError = message
+                case let .exit(status): if status != 0 { crashed = status }
+                default: break
+                }
+            }
+
+            if let remoteError {
+                errorMessage = remoteError
+                downloadStatus = nil
+                return
+            }
+            if let crashed, !finished {
+                let detail = (try? await remoteClient.readRemoteFile("stderr.log", in: jobDir))?
+                    .split(separator: "\n").suffix(5).joined(separator: "\n") ?? ""
+                errorMessage = "The download stopped on \(host) (exit status \(crashed)).\n\(detail)"
+                downloadStatus = nil
+                return
+            }
+            if finished {
+                if failures.isEmpty {
+                    downloadStatus = "Downloaded \(count) file\(count == 1 ? "" : "s") to \(destinationDescription)"
+                } else {
+                    downloadStatus = nil
+                    errorMessage = "\(failures.count) of \(count) downloads failed:\n" + failures.joined(separator: "\n")
+                }
+                return
+            }
+            try? await Task.sleep(for: .seconds(3))
+        }
+    }
+
     func download() async {
         let destinationPath: String
         if downloadRemotely {
@@ -499,7 +573,7 @@ final class SearchViewModel {
             guard let destination else { errorMessage = "Choose a download folder first."; return }
             destinationPath = destination.path
         }
-        let runner = downloadRemotely ? remoteClient : client
+        let runner = client
         let chosen = allFiles.filter { selection.contains($0.id) }
         guard !chosen.isEmpty else { return }
         errorMessage = nil
@@ -508,9 +582,14 @@ final class SearchViewModel {
         downloadStatus = "Starting…"
         defer { isDownloading = false }
 
+        let request: [String: Any] = ["urls": chosen.map(\.url), "dest": destinationPath]
+        if downloadRemotely {
+            await runRemoteDownload(request: request, count: chosen.count)
+            return
+        }
+
         var failures: [String] = []
         do {
-            let request: [String: Any] = ["urls": chosen.map(\.url), "dest": destinationPath]
             for try await event in runner.run("download", request: request) {
                 switch event {
                 case let .progress(index, total, name):

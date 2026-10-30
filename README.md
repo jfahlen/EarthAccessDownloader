@@ -36,7 +36,7 @@ Footprints are the catalog's own outlines. EMIT, AVIRIS‑5 and most others are 
 
 ### Downloading
 
-- Download to a local folder, or to a **remote machine over SSH**, which is handy for pulling data directly onto a server or cluster.
+- Download to a local folder, or to a **remote machine over SSH**, which is handy for pulling data directly onto a server or cluster. A remote download is handed to the remote machine and runs there on its own, so it keeps going if your connection drops, your laptop sleeps, or you quit the app.
 
 ## How it works
 
@@ -44,7 +44,7 @@ The app is a SwiftUI frontend (`EarthAccessDownloader/`) that shells out to a sm
 
 The map is MapKit. Footprints, browse image links and cloud cover all come from the same catalog records the search returns.
 
-For remote downloads, the same helper script is shipped inline over SSH and run with the remote machine's Python. Nothing needs to be installed on the remote host beyond `earthaccess` itself.
+For remote downloads, the helper script is copied over SSH into `~/.earthaccess_downloader/jobs/<id>/` on the remote machine and started in the background there. The app then checks in over short SSH connections to show progress. Nothing needs to be installed on the remote host beyond `earthaccess` itself.
 
 ## Requirements
 
@@ -73,7 +73,7 @@ To download straight to a remote machine instead of your Mac, set **Download** t
 - **Folder:** the destination folder on the remote machine
 - **Python:** the remote `python3` (or full path) that has `earthaccess` installed
 
-Use **Test Connection** to check it. This requires key- or agent-based SSH auth (no password prompts), and Earthdata credentials available on the remote machine in the same way as above. Quicklooks always download to your Mac.
+Use **Test Connection** to check it. Each download job keeps its log in `~/.earthaccess_downloader/jobs/<id>/events.jsonl` on the remote machine, which you can read yourself if the app is closed. This requires key- or agent-based SSH auth (no password prompts), and Earthdata credentials available on the remote machine in the same way as above. Quicklooks always download to your Mac.
 
 ## License
 
